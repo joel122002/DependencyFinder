@@ -14,7 +14,8 @@ class Program
     static async Task Main(string[] args)
     {
         // 1. CONFIGURATION: Set your paths here
-        string projectPath = @"/home/joelvarghese/Code/carwaleweb/Carwale/Carwale.UI.csproj";
+        // Point this to your .SLN file now
+        string solutionPath = @"/home/joelvarghese/Code/carwaleweb/Monorepo.sln";
         string targetFileName = "ModelPageAdapter.cs"; 
 
         // 2. Register MSBuild
@@ -24,18 +25,33 @@ class Program
         var _ = typeof(Microsoft.CodeAnalysis.CSharp.Formatting.CSharpFormattingOptions);
         
         using var workspace = MSBuildWorkspace.Create();
+        
+        // This is crucial for large solutions to avoid crashing on unknown project types (like installers)
         workspace.SkipUnrecognizedProjects = true;
 
-        Console.WriteLine($"Loading project: {projectPath}...");
-        // Handle loading errors gracefully to avoid crash on partial loads
-        var project = await workspace.OpenProjectAsync(projectPath);
+        Console.WriteLine($"Loading solution: {solutionPath}...");
+        Console.WriteLine("This may take a moment for large solutions...");
 
-        // 3. Find the specific document
-        var document = project.Documents.FirstOrDefault(d => d.Name.EndsWith(targetFileName));
+        // Open the Solution instead of the Project
+        var solution = await workspace.OpenSolutionAsync(solutionPath);
+
+        // 3. Find the specific document across ALL projects in the solution
+        Document document = null;
+        
+        foreach (var proj in solution.Projects)
+        {
+            var doc = proj.Documents.FirstOrDefault(d => d.Name.EndsWith(targetFileName));
+            if (doc != null)
+            {
+                document = doc;
+                Console.WriteLine($"\nFound file '{targetFileName}' in project: {proj.Name}");
+                break; // Stop at the first match
+            }
+        }
 
         if (document == null)
         {
-            Console.WriteLine($"Error: Could not find file '{targetFileName}' in project.");
+            Console.WriteLine($"Error: Could not find file '{targetFileName}' in any project within the solution.");
             return;
         }
 
@@ -45,7 +61,7 @@ class Program
         var root = await document.GetSyntaxRootAsync();
         var model = await document.GetSemanticModelAsync();
 
-        // Dictionary: Key = FilePath, Value = Set of things used (Methods/Classes)
+        // Dictionary: Key = FilePath, Value = Set of things used
         var fileDependencies = new Dictionary<string, HashSet<string>>();
 
         // 5. Traverse nodes
@@ -57,14 +73,11 @@ class Program
 
             if (symbol == null) continue;
 
-            // We want to find the file where this symbol (Method/Class/Prop) is DEFINED.
-            // If it's a Method, ContainingType is the Class. 
-            // If it's a Class, it IS the type.
             var definitionType = symbol is INamedTypeSymbol namedType ? namedType : symbol.ContainingType;
 
             if (definitionType == null) continue;
 
-            // 6. Check if defined in Source Code (not metadata/DLL)
+            // 6. Check where this is defined
             if (definitionType.DeclaringSyntaxReferences.Any())
             {
                 var syntaxRef = definitionType.DeclaringSyntaxReferences.First();
@@ -78,9 +91,7 @@ class Program
                         fileDependencies[originalFilePath] = new HashSet<string>();
                     }
 
-                    // Generate a readable name for what is being used
                     string usageName = GetReadableSymbolName(symbol);
-                    
                     fileDependencies[originalFilePath].Add(usageName);
                 }
             }
@@ -97,9 +108,12 @@ class Program
         {
             foreach (var kvp in fileDependencies)
             {
-                string fileName = Path.GetFileName(kvp.Key);
-                Console.WriteLine($"\nFile: {fileName}");
-                // Console.WriteLine($"Path: {kvp.Key}"); // Uncomment for full path
+                // string fileName = Path.GetFileName(kvp.Key);
+                string fileName = kvp.Key;
+                // We display the file name AND the project folder name to help distinguish common files
+                string folderName = Path.GetFileName(Path.GetDirectoryName(kvp.Key));
+                
+                Console.WriteLine($"\nFile: {fileName} (in {folderName})");
 
                 foreach (var usage in kvp.Value.OrderBy(x => x))
                 {
@@ -109,26 +123,20 @@ class Program
         }
     }
 
-    // Helper to make the output readable (e.g. "Method(int, string)" instead of just "Method")
     static string GetReadableSymbolName(ISymbol symbol)
     {
-        // For methods, we want the signature to see overloads
         if (symbol is IMethodSymbol methodSymbol)
         {
             return $"[Method] {methodSymbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}";
         }
-        // For properties
         if (symbol is IPropertySymbol)
         {
             return $"[Property] {symbol.Name}";
         }
-        // For classes/interfaces (e.g. variable declarations `MyClass c = ...`)
         if (symbol is INamedTypeSymbol)
         {
             return $"[Type] {symbol.Name}";
         }
-        
-        // Fallback
         return $"[{symbol.Kind}] {symbol.Name}";
     }
 }
